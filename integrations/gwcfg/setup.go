@@ -192,10 +192,10 @@ func setCIDGravityToken(keys []groupedEnvKey, walletPath string, env map[string]
 					fmt.Println("\n✅ Obtained CIDGravity API token via API.")
 					env[k.Var] = res.Token
 					claimed := false
-					message := fmt.Sprintf("Click this link to claim your account and manage CIDGravity settings:\n%s", res.URL)
+					fmt.Printf("\nClaim your CIDGravity account and manage settings:\n%s\n\n", res.URL)
 					confirm := huh.NewConfirm().
 						Title("Claim CIDGravity account").
-						Description(message).
+						Description("Open the URL printed above to claim your account.").
 						Affirmative("I've claimed the account").
 						Negative("Skip").
 						Value(&claimed)
