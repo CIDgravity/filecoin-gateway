@@ -250,8 +250,7 @@ func Open(root string, opts ...OpenOption) (iface2.RIBS, error) {
 
 		close: make(chan struct{}),
 		//workerClosed: make(chan struct{}),
-		spCrawlClosed:     make(chan struct{}),
-		marketWatchClosed: make(chan struct{}),
+		spCrawlClosed: make(chan struct{}),
 
 		moreDealsLocks: map[iface2.GroupKey]struct{}{},
 
@@ -372,7 +371,6 @@ func (r *ribs) RetrStats() (iface2.RetrStats, error) {
 func (r *ribs) Close() error {
 	close(r.close)
 	<-r.spCrawlClosed
-	<-r.marketWatchClosed
 
 	return r.RBS.Close()
 }
