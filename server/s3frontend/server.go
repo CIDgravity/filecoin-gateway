@@ -4,14 +4,39 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/CIDgravity/filecoin-gateway/configuration"
 	"github.com/CIDgravity/filecoin-gateway/server/s3"
 	pool "github.com/libp2p/go-buffer-pool"
 )
+
+// proxyTransport is a shared HTTP transport for proxying requests to backends.
+// Connection pooling and keep-alive prevent ephemeral port exhaustion under
+// parallel uploads.
+var proxyTransport = &http.Transport{
+	DialContext: (&net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext,
+	MaxIdleConns:        200,
+	MaxIdleConnsPerHost: 100,
+	MaxConnsPerHost:     0, // unlimited
+	IdleConnTimeout:     90 * time.Second,
+	DisableCompression:  true,
+	WriteBufferSize:     64 * 1024,
+	ReadBufferSize:      64 * 1024,
+}
+
+// proxyClient is a shared HTTP client backed by proxyTransport.
+var proxyClient = &http.Client{
+	Transport: proxyTransport,
+	Timeout:   0, // per-request context controls timeout
+}
 
 // FrontendServer is a stateless S3 proxy that routes requests to Kuri backend nodes
 type FrontendServer struct {
@@ -334,9 +359,8 @@ func (s *FrontendServer) proxyRequest(backend *Backend, w http.ResponseWriter, r
 		req.Header.Set("X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD")
 	}
 
-	// Execute request
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	// Execute request via shared pooled client
+	resp, err := proxyClient.Do(req)
 	if err != nil {
 		log.Errorw("Failed to proxy request", "error", err, "backend", backend.ID())
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)

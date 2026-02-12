@@ -1,29 +1,47 @@
 package rbstor
 
 import (
+	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/CIDgravity/filecoin-gateway/iface"
 )
 
-// ClusterMetrics collects and stores metrics for cluster monitoring
+// ClusterMetrics collects and stores metrics for cluster monitoring.
+//
+// Design: hot-path recording (RecordRead, RecordWrite, StartRead, etc.) uses
+// atomic counters + a small latency-buffer mutex so it never contends with
+// readers.  A background ticker calls collect() every 10s under a write lock.
+// All read-side methods (Get*) only take a read lock and never write-lock,
+// eliminating the Lock/Unlock/RLock convoy that previously caused goroutine
+// pileup.
 type ClusterMetrics struct {
-	mu sync.RWMutex
+	// --- hot-path atomics (no lock needed) ---
+	totalReads      atomic.Int64
+	totalWrites     atomic.Int64
+	totalErrors     atomic.Int64
+	activeReads     atomic.Int64
+	activeWrites    atomic.Int64
+	activeMultipart atomic.Int64
+	totalReadBytes  atomic.Int64
+	totalWriteBytes atomic.Int64
 
-	// Request counters
-	totalReads      int64
-	totalWrites     int64
-	totalErrors     int64
-	activeReads     int64
-	activeWrites    int64
-	activeMultipart int64
+	// Per-interval counters (swapped atomically at collect)
+	intervalReads      atomic.Int64
+	intervalWrites     atomic.Int64
+	intervalErrors     atomic.Int64
+	intervalReadBytes  atomic.Int64
+	intervalWriteBytes atomic.Int64
 
-	// Byte counters
-	totalReadBytes  int64
-	totalWriteBytes int64
+	// Latency buffer needs a separate small lock because append is not atomic
+	latMu                  sync.Mutex
+	intervalReadLatencies  []float64
+	intervalWriteLatencies []float64
 
-	// Time series data (last 10 minutes at 10-second intervals = 60 points)
+	// --- time-series data, protected by mu ---
+	mu             sync.RWMutex
 	timestamps     []int64
 	readCounts     []int64
 	writeCounts    []int64
@@ -33,21 +51,13 @@ type ClusterMetrics struct {
 	readBytes      []int64
 	writeBytes     []int64
 
-	// Per-interval counters (reset each interval)
-	intervalReads          int64
-	intervalWrites         int64
-	intervalErrors         int64
-	intervalReadLatencies  []float64
-	intervalWriteLatencies []float64
-	intervalReadBytes      int64
-	intervalWriteBytes     int64
-
 	// Events
 	events []iface.ClusterEvent
 
-	// Last collection time
-	lastCollect time.Time
-	startTime   time.Time
+	startTime time.Time
+
+	stopOnce sync.Once
+	stopCh   chan struct{}
 }
 
 const (
@@ -56,9 +66,34 @@ const (
 	maxEvents       = 100
 )
 
-var globalClusterMetrics = &ClusterMetrics{
-	startTime:   time.Now(),
-	lastCollect: time.Now(),
+var globalClusterMetrics *ClusterMetrics
+
+func init() {
+	m := &ClusterMetrics{
+		startTime: time.Now(),
+		stopCh:    make(chan struct{}),
+	}
+	globalClusterMetrics = m
+	go m.collectLoop()
+}
+
+// collectLoop runs the background collection ticker
+func (m *ClusterMetrics) collectLoop() {
+	ticker := time.NewTicker(collectInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			m.collect()
+		case <-m.stopCh:
+			return
+		}
+	}
+}
+
+// Stop stops the background collection loop (for testing)
+func (m *ClusterMetrics) Stop() {
+	m.stopOnce.Do(func() { close(m.stopCh) })
 }
 
 // GetClusterMetrics returns the global cluster metrics instance
@@ -68,69 +103,58 @@ func GetClusterMetrics() *ClusterMetrics {
 
 // RecordRead records a read operation with bytes transferred
 func (m *ClusterMetrics) RecordRead(latencyMs float64, bytes int64, err error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	m.totalReads++
-	m.intervalReads++
-	m.intervalReadLatencies = append(m.intervalReadLatencies, latencyMs)
-	m.totalReadBytes += bytes
-	m.intervalReadBytes += bytes
+	m.totalReads.Add(1)
+	m.intervalReads.Add(1)
+	m.totalReadBytes.Add(bytes)
+	m.intervalReadBytes.Add(bytes)
 	if err != nil {
-		m.totalErrors++
-		m.intervalErrors++
+		m.totalErrors.Add(1)
+		m.intervalErrors.Add(1)
 	}
+
+	m.latMu.Lock()
+	m.intervalReadLatencies = append(m.intervalReadLatencies, latencyMs)
+	m.latMu.Unlock()
 }
 
 // RecordWrite records a write operation with bytes transferred
 func (m *ClusterMetrics) RecordWrite(latencyMs float64, bytes int64, err error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	m.totalWrites++
-	m.totalWriteBytes += bytes
-	m.intervalWriteBytes += bytes
-	m.intervalWrites++
-	m.intervalWriteLatencies = append(m.intervalWriteLatencies, latencyMs)
+	m.totalWrites.Add(1)
+	m.intervalWrites.Add(1)
+	m.totalWriteBytes.Add(bytes)
+	m.intervalWriteBytes.Add(bytes)
 	if err != nil {
-		m.totalErrors++
-		m.intervalErrors++
+		m.totalErrors.Add(1)
+		m.intervalErrors.Add(1)
 	}
+
+	m.latMu.Lock()
+	m.intervalWriteLatencies = append(m.intervalWriteLatencies, latencyMs)
+	m.latMu.Unlock()
 }
 
 // StartRead marks a read as in-flight
 func (m *ClusterMetrics) StartRead() {
-	m.mu.Lock()
-	m.activeReads++
-	m.mu.Unlock()
+	m.activeReads.Add(1)
 }
 
 // EndRead marks a read as complete
 func (m *ClusterMetrics) EndRead() {
-	m.mu.Lock()
-	m.activeReads--
-	m.mu.Unlock()
+	m.activeReads.Add(-1)
 }
 
 // StartWrite marks a write as in-flight
 func (m *ClusterMetrics) StartWrite() {
-	m.mu.Lock()
-	m.activeWrites++
-	m.mu.Unlock()
+	m.activeWrites.Add(1)
 }
 
 // EndWrite marks a write as complete
 func (m *ClusterMetrics) EndWrite() {
-	m.mu.Lock()
-	m.activeWrites--
-	m.mu.Unlock()
+	m.activeWrites.Add(-1)
 }
 
 // AddEvent adds a cluster event
 func (m *ClusterMetrics) AddEvent(eventType, message, nodeID string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	event := iface.ClusterEvent{
 		Timestamp: time.Now().Unix(),
 		Type:      eventType,
@@ -138,25 +162,46 @@ func (m *ClusterMetrics) AddEvent(eventType, message, nodeID string) {
 		NodeID:    nodeID,
 	}
 
+	m.mu.Lock()
 	m.events = append([]iface.ClusterEvent{event}, m.events...)
 	if len(m.events) > maxEvents {
 		m.events = m.events[:maxEvents]
 	}
+	m.mu.Unlock()
 }
 
-// collectInterval moves current interval data to time series
+// collect swaps interval counters and appends to time series.
+// Called by the background ticker under write lock.
 func (m *ClusterMetrics) collect() {
 	now := time.Now()
 
-	// Add current interval to time series
+	// Atomically swap interval counters to zero and capture their values
+	reads := m.intervalReads.Swap(0)
+	writes := m.intervalWrites.Swap(0)
+	errors := m.intervalErrors.Swap(0)
+	readB := m.intervalReadBytes.Swap(0)
+	writeB := m.intervalWriteBytes.Swap(0)
+
+	// Swap latency slices under the small latency lock
+	m.latMu.Lock()
+	readLat := m.intervalReadLatencies
+	writeLat := m.intervalWriteLatencies
+	m.intervalReadLatencies = nil
+	m.intervalWriteLatencies = nil
+	m.latMu.Unlock()
+
+	// Now take the write lock to append to time series
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	m.timestamps = append(m.timestamps, now.Unix())
-	m.readCounts = append(m.readCounts, m.intervalReads)
-	m.writeCounts = append(m.writeCounts, m.intervalWrites)
-	m.errorCounts = append(m.errorCounts, m.intervalErrors)
-	m.readLatencies = append(m.readLatencies, m.intervalReadLatencies)
-	m.writeLatencies = append(m.writeLatencies, m.intervalWriteLatencies)
-	m.readBytes = append(m.readBytes, m.intervalReadBytes)
-	m.writeBytes = append(m.writeBytes, m.intervalWriteBytes)
+	m.readCounts = append(m.readCounts, reads)
+	m.writeCounts = append(m.writeCounts, writes)
+	m.errorCounts = append(m.errorCounts, errors)
+	m.readLatencies = append(m.readLatencies, readLat)
+	m.writeLatencies = append(m.writeLatencies, writeLat)
+	m.readBytes = append(m.readBytes, readB)
+	m.writeBytes = append(m.writeBytes, writeB)
 
 	// Trim to max data points
 	if len(m.timestamps) > maxDataPoints {
@@ -169,44 +214,23 @@ func (m *ClusterMetrics) collect() {
 		m.readBytes = m.readBytes[1:]
 		m.writeBytes = m.writeBytes[1:]
 	}
-
-	// Reset interval counters
-	m.intervalReads = 0
-	m.intervalWrites = 0
-	m.intervalErrors = 0
-	m.intervalReadLatencies = nil
-	m.intervalWriteLatencies = nil
-	m.intervalReadBytes = 0
-	m.intervalWriteBytes = 0
-	m.lastCollect = now
-}
-
-// maybeCollect collects if enough time has passed
-func (m *ClusterMetrics) maybeCollect() {
-	if time.Since(m.lastCollect) >= collectInterval {
-		m.collect()
-	}
 }
 
 // GetThroughputHistory returns historical throughput data
 func (m *ClusterMetrics) GetThroughputHistory(duration string) iface.ThroughputHistory {
-	m.mu.Lock()
-	m.maybeCollect()
-	m.mu.Unlock()
-
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// Calculate how many points to return based on duration
 	points := len(m.timestamps)
 	if points == 0 {
-		// Return at least current state
 		now := time.Now().Unix()
+		curReads := m.intervalReads.Load()
+		curWrites := m.intervalWrites.Load()
 		return iface.ThroughputHistory{
 			Timestamps: []int64{now},
-			Total:      []float64{float64(m.intervalReads+m.intervalWrites) / collectInterval.Seconds()},
-			Reads:      []float64{float64(m.intervalReads) / collectInterval.Seconds()},
-			Writes:     []float64{float64(m.intervalWrites) / collectInterval.Seconds()},
+			Total:      []float64{float64(curReads+curWrites) / collectInterval.Seconds()},
+			Reads:      []float64{float64(curReads) / collectInterval.Seconds()},
+			Writes:     []float64{float64(curWrites) / collectInterval.Seconds()},
 			ByProxy:    make(map[string][]float64),
 		}
 	}
@@ -218,7 +242,6 @@ func (m *ClusterMetrics) GetThroughputHistory(duration string) iface.ThroughputH
 
 	for i := 0; i < points; i++ {
 		timestamps[i] = m.timestamps[i]
-		// Convert counts to requests per second
 		reads[i] = float64(m.readCounts[i]) / collectInterval.Seconds()
 		writes[i] = float64(m.writeCounts[i]) / collectInterval.Seconds()
 		total[i] = reads[i] + writes[i]
@@ -235,21 +258,19 @@ func (m *ClusterMetrics) GetThroughputHistory(duration string) iface.ThroughputH
 
 // GetIOThroughputHistory returns historical I/O bytes throughput data
 func (m *ClusterMetrics) GetIOThroughputHistory(duration string) iface.IOThroughputHistory {
-	m.mu.Lock()
-	m.maybeCollect()
-	m.mu.Unlock()
-
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	points := len(m.timestamps)
 	if points == 0 {
 		now := time.Now().Unix()
+		curReadB := m.intervalReadBytes.Load()
+		curWriteB := m.intervalWriteBytes.Load()
 		return iface.IOThroughputHistory{
 			Timestamps: []int64{now},
-			ReadBytes:  []float64{float64(m.intervalReadBytes) / collectInterval.Seconds()},
-			WriteBytes: []float64{float64(m.intervalWriteBytes) / collectInterval.Seconds()},
-			TotalBytes: []float64{float64(m.intervalReadBytes+m.intervalWriteBytes) / collectInterval.Seconds()},
+			ReadBytes:  []float64{float64(curReadB) / collectInterval.Seconds()},
+			WriteBytes: []float64{float64(curWriteB) / collectInterval.Seconds()},
+			TotalBytes: []float64{float64(curReadB+curWriteB) / collectInterval.Seconds()},
 		}
 	}
 
@@ -260,7 +281,6 @@ func (m *ClusterMetrics) GetIOThroughputHistory(duration string) iface.IOThrough
 
 	for i := 0; i < points; i++ {
 		timestamps[i] = m.timestamps[i]
-		// Convert bytes to bytes per second
 		readBytes[i] = float64(m.readBytes[i]) / collectInterval.Seconds()
 		writeBytes[i] = float64(m.writeBytes[i]) / collectInterval.Seconds()
 		totalBytes[i] = readBytes[i] + writeBytes[i]
@@ -285,10 +305,6 @@ func percentile(sorted []float64, p float64) float64 {
 
 // GetLatencyDistribution returns latency percentiles
 func (m *ClusterMetrics) GetLatencyDistribution(duration string) iface.LatencyDistribution {
-	m.mu.Lock()
-	m.maybeCollect()
-	m.mu.Unlock()
-
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -320,19 +336,10 @@ func (m *ClusterMetrics) GetLatencyDistribution(duration string) iface.LatencyDi
 		all = append(all, m.writeLatencies[i]...)
 
 		if len(all) > 0 {
-			// Sort for percentile calculation
-			sorted := make([]float64, len(all))
-			copy(sorted, all)
-			for j := 0; j < len(sorted)-1; j++ {
-				for k := j + 1; k < len(sorted); k++ {
-					if sorted[j] > sorted[k] {
-						sorted[j], sorted[k] = sorted[k], sorted[j]
-					}
-				}
-			}
-			p50[i] = percentile(sorted, 0.50)
-			p95[i] = percentile(sorted, 0.95)
-			p99[i] = percentile(sorted, 0.99)
+			sort.Float64s(all)
+			p50[i] = percentile(all, 0.50)
+			p95[i] = percentile(all, 0.95)
+			p99[i] = percentile(all, 0.99)
 		}
 	}
 
@@ -351,13 +358,11 @@ func (m *ClusterMetrics) GetLatencyDistribution(duration string) iface.LatencyDi
 
 // GetErrorRates returns error statistics
 func (m *ClusterMetrics) GetErrorRates() iface.ErrorRates {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	totalOps := m.totalReads + m.totalWrites
+	totalOps := m.totalReads.Load() + m.totalWrites.Load()
+	totalErrs := m.totalErrors.Load()
 	errorRate := float64(0)
 	if totalOps > 0 {
-		errorRate = float64(m.totalErrors) / float64(totalOps) * 100
+		errorRate = float64(totalErrs) / float64(totalOps) * 100
 	}
 
 	trend := "stable"
@@ -380,14 +385,15 @@ func (m *ClusterMetrics) GetErrorRates() iface.ErrorRates {
 
 // GetActiveRequests returns current in-flight requests
 func (m *ClusterMetrics) GetActiveRequests() iface.ActiveRequests {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	reads := m.activeReads.Load()
+	writes := m.activeWrites.Load()
+	multipart := m.activeMultipart.Load()
 
 	return iface.ActiveRequests{
-		Total:     int(m.activeReads + m.activeWrites + m.activeMultipart),
-		Reads:     int(m.activeReads),
-		Writes:    int(m.activeWrites),
-		Multipart: int(m.activeMultipart),
+		Total:     int(reads + writes + multipart),
+		Reads:     int(reads),
+		Writes:    int(writes),
+		Multipart: int(multipart),
 		ByProxy:   make(map[string]int),
 		ByStorage: make(map[string]int),
 	}

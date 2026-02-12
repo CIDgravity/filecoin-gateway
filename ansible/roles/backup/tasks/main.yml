@@ -5,16 +5,24 @@
 # =============================================================================
 # Install Dependencies
 # =============================================================================
-- name: Install backup dependencies
+- name: Install backup dependencies (core)
   ansible.builtin.apt:
     name:
-      - awscli
       - gnupg
       - gzip
       - tar
     state: present
     update_cache: yes
   when: ansible_os_family == "Debian"
+
+- name: Install awscli for S3 backups
+  ansible.builtin.apt:
+    name: awscli
+    state: present
+  when:
+    - ansible_os_family == "Debian"
+    - backup_s3_bucket | default('') | length > 0
+  ignore_errors: yes
 
 # =============================================================================
 # Create Directories

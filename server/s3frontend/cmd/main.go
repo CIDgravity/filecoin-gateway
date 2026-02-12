@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -11,6 +13,7 @@ import (
 	"github.com/CIDgravity/filecoin-gateway/configuration"
 	"github.com/CIDgravity/filecoin-gateway/server/s3"
 	"github.com/CIDgravity/filecoin-gateway/server/s3frontend"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func main() {
@@ -51,8 +54,8 @@ func mainRet() int {
 	router := s3frontend.NewObjectRouterFromDB(db)
 	multipartTracker := s3frontend.NewMultipartTrackerFromDB(db)
 
-	// Get node ID from configuration
-	nodeID := cfg.Frontend.NodeID
+	// Get node ID
+	nodeID := os.Getenv("FGW_NODE_ID")
 	if nodeID == "" {
 		nodeID = "frontend-default"
 	}
@@ -67,6 +70,21 @@ func mainRet() int {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to start server: %v\n", err)
 		return 1
+	}
+
+	// Start Prometheus metrics server
+	promPort := os.Getenv("RIBS_PROMETHEUS_PORT")
+	if promPort != "" {
+		promMux := http.NewServeMux()
+		promMux.Handle("/metrics", promhttp.Handler())
+		promMux.Handle("/debug/", http.DefaultServeMux) // pprof
+		promServer := &http.Server{Addr: ":" + promPort, Handler: promMux}
+		go func() {
+			fmt.Printf("Prometheus metrics on :%s/metrics\n", promPort)
+			if err := promServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				fmt.Fprintf(os.Stderr, "Prometheus server error: %v\n", err)
+			}
+		}()
 	}
 
 	fmt.Printf("S3 Frontend Proxy started on %s (node: %s)\n", cfg.S3API.BindAddr, nodeID)

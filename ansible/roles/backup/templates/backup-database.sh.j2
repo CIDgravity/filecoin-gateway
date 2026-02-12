@@ -67,9 +67,12 @@ trap cleanup EXIT
 # =============================================================================
 log "Starting database backup for ${NODE_ID}"
 
-# Check S3 bucket is configured
-if [[ -z "${S3_BUCKET}" ]]; then
-    error "S3 bucket not configured"
+# Check if S3 is configured
+S3_ENABLED="false"
+if [[ -n "${S3_BUCKET}" ]]; then
+    S3_ENABLED="true"
+else
+    log "WARNING: S3 bucket not configured - local-only backup"
 fi
 
 # Check ysql_dump is available (YugabyteDB tool)
@@ -190,40 +193,41 @@ ARCHIVE_SIZE=$(stat -c%s "${ARCHIVE_PATH}" 2>/dev/null || stat -f%z "${ARCHIVE_P
 log "Backup archive created: ${ARCHIVE_SIZE} bytes"
 
 # =============================================================================
-# Upload to S3
+# Upload to S3 (if configured)
 # =============================================================================
-log "Uploading to S3: s3://${S3_BUCKET}/${S3_PREFIX}/${BACKUP_NAME}.tar.gz"
+if [[ "${S3_ENABLED}" == "true" ]]; then
+    log "Uploading to S3: s3://${S3_BUCKET}/${S3_PREFIX}/${BACKUP_NAME}.tar.gz"
 
-aws s3 cp \
-    "${ARCHIVE_PATH}" \
-    "s3://${S3_BUCKET}/${S3_PREFIX}/${BACKUP_NAME}.tar.gz" \
-    --endpoint-url "${S3_ENDPOINT}" \
-    --region "${S3_REGION}"
+    aws s3 cp \
+        "${ARCHIVE_PATH}" \
+        "s3://${S3_BUCKET}/${S3_PREFIX}/${BACKUP_NAME}.tar.gz" \
+        --endpoint-url "${S3_ENDPOINT}" \
+        --region "${S3_REGION}"
 
-if [[ $? -ne 0 ]]; then
-    error "S3 upload failed"
+    if [[ $? -ne 0 ]]; then
+        error "S3 upload failed"
+    fi
+
+    log "S3 upload complete"
+
+    log "Verifying S3 upload..."
+
+    S3_SIZE=$(aws s3api head-object \
+        --bucket "${S3_BUCKET}" \
+        --key "${S3_PREFIX}/${BACKUP_NAME}.tar.gz" \
+        --endpoint-url "${S3_ENDPOINT}" \
+        --region "${S3_REGION}" \
+        --query "ContentLength" \
+        --output text 2>/dev/null || echo "0")
+
+    if [[ "${S3_SIZE}" != "${ARCHIVE_SIZE}" ]]; then
+        error "S3 upload verification failed - size mismatch (local: ${ARCHIVE_SIZE}, S3: ${S3_SIZE})"
+    fi
+
+    log "S3 upload verified: ${S3_SIZE} bytes"
+else
+    log "S3 not configured - skipping upload"
 fi
-
-log "S3 upload complete"
-
-# =============================================================================
-# Verify S3 Upload
-# =============================================================================
-log "Verifying S3 upload..."
-
-S3_SIZE=$(aws s3api head-object \
-    --bucket "${S3_BUCKET}" \
-    --key "${S3_PREFIX}/${BACKUP_NAME}.tar.gz" \
-    --endpoint-url "${S3_ENDPOINT}" \
-    --region "${S3_REGION}" \
-    --query "ContentLength" \
-    --output text 2>/dev/null || echo "0")
-
-if [[ "${S3_SIZE}" != "${ARCHIVE_SIZE}" ]]; then
-    error "S3 upload verification failed - size mismatch (local: ${ARCHIVE_SIZE}, S3: ${S3_SIZE})"
-fi
-
-log "S3 upload verified: ${S3_SIZE} bytes"
 
 # =============================================================================
 # Cleanup Old Local Backups
@@ -240,34 +244,34 @@ LOCAL_COUNT=$(ls -1 "${BACKUP_DIR}"/database-${NODE_ID}-*.tar.gz 2>/dev/null | w
 log "Local backups after cleanup: ${LOCAL_COUNT}"
 
 # =============================================================================
-# Cleanup Old S3 Backups
+# Cleanup Old S3 Backups (if configured)
 # =============================================================================
-log "Cleaning up old S3 backups (older than ${RETENTION_DAYS} days)..."
+if [[ "${S3_ENABLED}" == "true" ]]; then
+    log "Cleaning up old S3 backups (older than ${RETENTION_DAYS} days)..."
 
-# Calculate cutoff date
-CUTOFF_DATE=$(date -d "-${RETENTION_DAYS} days" +%Y%m%d 2>/dev/null || \
-              date -v-${RETENTION_DAYS}d +%Y%m%d)
+    CUTOFF_DATE=$(date -d "-${RETENTION_DAYS} days" +%Y%m%d 2>/dev/null || \
+                  date -v-${RETENTION_DAYS}d +%Y%m%d)
 
-# List and delete old backups
-OLD_BACKUPS=$(aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/" \
-    --endpoint-url "${S3_ENDPOINT}" \
-    --region "${S3_REGION}" 2>/dev/null | \
-    awk '{print $4}' | \
-    grep "^database-${NODE_ID}-[0-9]*-" | \
-    while read -r backup; do
-        BACKUP_DATE=$(echo "$backup" | grep -oP 'database-[^-]+-\K[0-9]{8}')
-        if [[ -n "${BACKUP_DATE}" && "${BACKUP_DATE}" < "${CUTOFF_DATE}" ]]; then
-            echo "$backup"
-        fi
-    done)
+    OLD_BACKUPS=$(aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/" \
+        --endpoint-url "${S3_ENDPOINT}" \
+        --region "${S3_REGION}" 2>/dev/null | \
+        awk '{print $4}' | \
+        grep "^database-${NODE_ID}-[0-9]*-" | \
+        while read -r backup; do
+            BACKUP_DATE=$(echo "$backup" | grep -oP 'database-[^-]+-\K[0-9]{8}')
+            if [[ -n "${BACKUP_DATE}" && "${BACKUP_DATE}" < "${CUTOFF_DATE}" ]]; then
+                echo "$backup"
+            fi
+        done)
 
-if [[ -n "${OLD_BACKUPS}" ]]; then
-    echo "${OLD_BACKUPS}" | while read -r backup; do
-        log "Deleting old backup: ${backup}"
-        aws s3 rm "s3://${S3_BUCKET}/${S3_PREFIX}/${backup}" \
-            --endpoint-url "${S3_ENDPOINT}" \
-            --region "${S3_REGION}" 2>/dev/null || true
-    done
+    if [[ -n "${OLD_BACKUPS}" ]]; then
+        echo "${OLD_BACKUPS}" | while read -r backup; do
+            log "Deleting old backup: ${backup}"
+            aws s3 rm "s3://${S3_BUCKET}/${S3_PREFIX}/${backup}" \
+                --endpoint-url "${S3_ENDPOINT}" \
+                --region "${S3_REGION}" 2>/dev/null || true
+        done
+    fi
 fi
 
 # =============================================================================
@@ -278,5 +282,8 @@ log "Database backup completed successfully"
 log "  Node: ${NODE_ID}"
 log "  Backup: ${BACKUP_NAME}.tar.gz"
 log "  Size: ${ARCHIVE_SIZE} bytes"
-log "  S3 Location: s3://${S3_BUCKET}/${S3_PREFIX}/${BACKUP_NAME}.tar.gz"
+log "  Local: ${BACKUP_DIR}/${BACKUP_NAME}.tar.gz"
+if [[ "${S3_ENABLED}" == "true" ]]; then
+    log "  S3: s3://${S3_BUCKET}/${S3_PREFIX}/${BACKUP_NAME}.tar.gz"
+fi
 log "=========================================="

@@ -157,8 +157,26 @@ func TestLoadBalancer_PickBest(t *testing.T) {
 		{group: group3, score: 0.3},
 	}
 
-	best := lb.pickBest(candidates)
-	require.Equal(t, int64(2), best.id, "should pick group with highest score")
+	// pickBest uses weighted random selection, so we run it many times
+	// and verify the distribution roughly matches the weight proportions.
+	// Total weight = 0.5 + 0.9 + 0.3 = 1.7
+	// Expected: group2 ~53%, group1 ~29%, group3 ~18%
+	counts := map[int64]int{}
+	const N = 10000
+	for i := 0; i < N; i++ {
+		best := lb.pickBest(candidates)
+		require.NotNil(t, best)
+		counts[best.id]++
+	}
+
+	// Group 2 (highest score) should be picked most often
+	require.Greater(t, counts[2], counts[1], "group2 should be picked more than group1")
+	require.Greater(t, counts[2], counts[3], "group2 should be picked more than group3")
+	require.Greater(t, counts[1], counts[3], "group1 should be picked more than group3")
+
+	// Sanity: each group should get at least some picks (no starvation)
+	require.Greater(t, counts[1], 0, "group1 should get some picks")
+	require.Greater(t, counts[3], 0, "group3 should get some picks")
 }
 
 func TestLoadBalancer_PickBest_Empty(t *testing.T) {

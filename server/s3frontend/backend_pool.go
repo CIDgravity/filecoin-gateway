@@ -79,7 +79,8 @@ func NewBackendPool(nodesConfig string) (*BackendPool, error) {
 			id:      id,
 			baseURL: url,
 			client: &http.Client{
-				Timeout: 30 * time.Second,
+				Transport: proxyTransport,
+				Timeout:   30 * time.Second,
 			},
 		}
 		backend.setHealth(true) // Assume healthy initially

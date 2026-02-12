@@ -22,8 +22,10 @@ fgw_config_dir: "{{ ribs_data }}/config"
 
 # -----------------------------------------------------------------------------
 # LocalWeb URL (HTTP, no TLS)
+# Must use the public IP so storage providers can fetch CAR files.
+# ansible_host is the private 10.x address; fgw_public_ip is the NAT'd address.
 # -----------------------------------------------------------------------------
-external_localweb_url: "http://{{ ansible_host }}:{{ kuri_localweb_port }}"
+external_localweb_url: "http://{{ fgw_public_ip }}:{{ kuri_localweb_port }}"
 
 # -----------------------------------------------------------------------------
 # Service Management
