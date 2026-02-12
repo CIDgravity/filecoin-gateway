@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -12,6 +13,17 @@ import (
 	"github.com/CIDgravity/filecoin-gateway/iface"
 	"golang.org/x/xerrors"
 )
+
+// replacePort parses a URL and replaces the port with the given one.
+func replacePort(rawURL, newPort string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	host := u.Hostname()
+	u.Host = host + ":" + newPort
+	return u.String()
+}
 
 // remoteNodeStats matches the NodeStats struct from web/ribsweb.go
 type remoteNodeStats struct {
@@ -255,16 +267,9 @@ func (r *rbs) ClusterTopology() iface.ClusterTopology {
 			nodeInfo.StorageUsed = localStorageUsed
 			nodeInfo.RequestsPerSecond = localReqPerSec
 		} else if healthy {
-			// Fetch stats from remote node via /api/stats endpoint
-			// The web UI is served on port 9010 by default. Extract the host from
-			// nodeURL and use the web UI port. nodeURL can be either the proxy port
-			// (8078) or the internal S3 port (8079).
-			statsURL := nodeURL
-			if idx := strings.LastIndex(statsURL, ":"); idx != -1 {
-				// Extract host (including scheme) up to the last colon, then append web UI port
-				statsURL = statsURL[:idx] + ":9010"
-			}
-			statsURL += "/api/stats"
+			// Fetch stats from remote node via /api/stats endpoint on the WebUI port.
+			// Parse the backend URL and replace the port with 9010 (WebUI).
+			statsURL := replacePort(nodeURL, "9010") + "/api/stats"
 			statsResp, err := client.Get(statsURL)
 			if err == nil && statsResp.StatusCode == http.StatusOK {
 				var stats remoteNodeStats

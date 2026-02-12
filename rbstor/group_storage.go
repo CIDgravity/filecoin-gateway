@@ -19,7 +19,7 @@ func (r *rbs) createGroup(ctx context.Context) (iface.GroupKey, *Group, error) {
 		return iface.UndefGroupKey, nil, xerrors.Errorf("creating group: %w", err)
 	}
 
-	g, err := r.openGroup(ctx, selectedGroup, 0, 0, 0, iface.GroupStateWritable, true)
+	g, err := r.openGroup(ctx, selectedGroup, 0, 0, 0, iface.GroupStateWritable, true, true)
 	if err != nil {
 		return iface.UndefGroupKey, nil, xerrors.Errorf("opening group: %w", err)
 	}
@@ -27,13 +27,18 @@ func (r *rbs) createGroup(ctx context.Context) (iface.GroupKey, *Group, error) {
 	return selectedGroup, g, nil
 }
 
-func (r *rbs) openGroup(ctx context.Context, group iface.GroupKey, blocks, bytes, jbhead int64, state iface.GroupState, create bool) (*Group, error) {
+// openGroup opens or creates a group and adds it to openGroups.
+// If addWritable is true AND the group state is writable, it also adds to
+// writableGroups. Only the load balancer and legacy write path should pass
+// addWritable=true; read paths must pass false to avoid exceeding
+// MaxParallelGroups.
+func (r *rbs) openGroup(ctx context.Context, group iface.GroupKey, blocks, bytes, jbhead int64, state iface.GroupState, create bool, addWritable bool) (*Group, error) {
 	g, err := OpenGroup(ctx, r.db, r.index, &r.staging, group, blocks, bytes, jbhead, r.root, state, create)
 	if err != nil {
 		return nil, xerrors.Errorf("opening group: %w", err)
 	}
 
-	if state == iface.GroupStateWritable {
+	if addWritable && state == iface.GroupStateWritable {
 		r.writableGroups[group] = g
 	}
 	r.openGroups[group] = g
@@ -104,7 +109,7 @@ func (r *rbs) withWritableGroupLegacy(ctx context.Context, prefer iface.GroupKey
 		}
 
 		if selectedGroup != iface.UndefGroupKey {
-			g, err := r.openGroup(ctx, selectedGroup, blocks, bytes, jbhead, state, false)
+			g, err := r.openGroup(ctx, selectedGroup, blocks, bytes, jbhead, state, false, true)
 			if err != nil {
 				return iface.UndefGroupKey, xerrors.Errorf("opening group: %w", err)
 			}
@@ -181,7 +186,7 @@ func (r *rbs) withReadableGroup(ctx context.Context, group iface.GroupKey, cb fu
 		return xerrors.Errorf("getting group metadata: %w", err)
 	}
 
-	g, err := r.openGroup(ctx, group, blocks, bytes, jbhead, state, false)
+	g, err := r.openGroup(ctx, group, blocks, bytes, jbhead, state, false, false)
 	if err != nil {
 		r.lk.Unlock()
 		return xerrors.Errorf("opening group: %w", err)
