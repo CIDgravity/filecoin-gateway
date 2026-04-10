@@ -5,6 +5,7 @@ gwcfg
 kuri
 settings.env
 .env
+secrets.env
 *~
 .idea/
 

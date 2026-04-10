@@ -1,0 +1,32 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: filecoin-gateway
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - yugabyte.yaml
+  - kuri.yaml
+
+# fgw-secrets is generated from a local .env file that is NOT checked
+# into git. create it before running kustomize:
+#
+#   cp secrets.env.example secrets.env
+#   $EDITOR secrets.env   # fill in real values
+#
+# kustomize will create the secret on apply and update it on re-apply,
+# but the name is kept stable (no hash suffix) so kuri doesn't need
+# a rollout on every apply.
+generatorOptions:
+  disableNameSuffixHash: true
+
+secretGenerator:
+  - name: fgw-secrets
+    envs:
+      - secrets.env
+
+# wallet-keys secret MUST be created out-of-band -- it contains
+# binary key files, not env vars. see secrets.env.example for
+# the kubectl create command. the init container will refuse to
+# start if wallet-keys is empty (F23 guard).
