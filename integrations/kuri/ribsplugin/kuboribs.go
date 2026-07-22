@@ -38,6 +38,7 @@ import (
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/mitchellh/go-homedir"
+	"github.com/multiformats/go-multihash"
 	"go.uber.org/fx"
 	"golang.org/x/xerrors"
 )
@@ -95,13 +96,17 @@ func (p *ribsPlugin) Options(info core.FXNodeInfo) ([]fx.Option, error) {
 
 		fx.Decorate(RibsFiles),
 
-		//fx.Invoke(StartMfsDav),
 		fx.Invoke(fgw_metrics.StartPrometheusServer),
 		fx.Invoke(fgw_s3.StartS3Server),
 		//fx.Invoke(StartMfsNFSFs),
 		fx.Invoke(StartMeta),
 		fx.Invoke(cidlocation2.StartWorkers),
 	)
+
+	if configuration.GetConfig().Ribs.WebDAVEnabled {
+		opts = append(opts, fx.Invoke(StartMfsDav))
+	}
+
 	return opts, nil
 }
 
@@ -314,7 +319,7 @@ func RibsFiles(mctx helpers.MetricsCtx, lc fx.Lifecycle, repo repo.Repo, rbs *ri
 		return nil, err
 	}
 
-	root, err := mfs.NewRoot(ctx, dag, nd, pf)
+	root, err := mfs.NewRoot(ctx, dag, nd, pf, noopProvider{})
 
 	lc.Append(fx.Hook{
 		OnStop: func(ctx context.Context) error {
@@ -332,3 +337,9 @@ func RibsFiles(mctx helpers.MetricsCtx, lc fx.Lifecycle, repo repo.Repo, rbs *ri
 
 	return root, err
 }
+
+// noopProvider is a no-op provider.MultihashProvider for mfs.NewRoot: kuri
+// does not announce MFS blocks to the DHT.
+type noopProvider struct{}
+
+func (noopProvider) StartProviding(_ bool, _ ...multihash.Multihash) error { return nil }
