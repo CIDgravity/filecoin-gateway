@@ -1,0 +1,200 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: fgw-data
+  namespace: filecoin-gateway
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 2Ti
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ipfs-data
+  namespace: filecoin-gateway
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kuri-s3
+  namespace: filecoin-gateway
+spec:
+  selector:
+    app: kuri
+  ports:
+    - name: s3
+      port: 8078
+      targetPort: 8078
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kuri-metrics
+  namespace: filecoin-gateway
+spec:
+  selector:
+    app: kuri
+  ports:
+    - name: metrics
+      port: 2112
+      targetPort: 2112
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kuri-webui
+  namespace: filecoin-gateway
+spec:
+  selector:
+    app: kuri
+  ports:
+    - name: webui
+      port: 9010
+      targetPort: 9010
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kuri
+  namespace: filecoin-gateway
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate  # single writer, can't run two instances
+  selector:
+    matchLabels:
+      app: kuri
+  template:
+    metadata:
+      labels:
+        app: kuri
+    spec:
+      initContainers:
+        # source settings.env + secrets into a merged env file
+        # that kuri can load. this avoids the env_file format issues
+        # and keeps secrets out of the configmap.
+        - name: merge-config
+          image: docker.io/library/busybox:latest
+          command:
+            - sh
+            - -c
+            - |
+              # merge configmap + secrets into a single env file
+              cp /config-ro/settings.env /config-rw/settings.env
+              echo "" >> /config-rw/settings.env
+              echo "CIDGRAVITY_API_TOKEN=$(cat /secrets/CIDGRAVITY_API_TOKEN)" >> /config-rw/settings.env
+              echo "RIBS_YUGABYTE_SQL_USER=$(cat /secrets/RIBS_YUGABYTE_SQL_USER)" >> /config-rw/settings.env
+              echo "RIBS_YUGABYTE_SQL_PASS=$(cat /secrets/RIBS_YUGABYTE_SQL_PASS)" >> /config-rw/settings.env
+
+              # copy wallet keys to regular dir (k8s secret symlinks have
+              # 0777 which lotus rejects -- must be 0600)
+              mkdir -p /wallet-rw
+              found=0
+              for f in /wallet-ro/*; do
+                [ -f "$f" ] || continue
+                cp "$f" "/wallet-rw/$(basename $f)"
+                found=1
+              done
+
+              # F23 guard: refuse to start with empty wallet.
+              # kuri silently regenerates a new (unfunded) wallet on
+              # empty dir, which leads to silent state divergence.
+              if [ "$found" -eq 0 ]; then
+                echo "FATAL: wallet-keys secret is empty. refusing to start."
+                echo "create it with: kubectl create secret generic wallet-keys --from-file=/path/to/wallet/ -n filecoin-gateway"
+                exit 1
+              fi
+              chmod 0600 /wallet-rw/*
+              chmod 0700 /wallet-rw
+          volumeMounts:
+            - name: config-ro
+              mountPath: /config-ro
+            - name: config-rw
+              mountPath: /config-rw
+            - name: secrets
+              mountPath: /secrets
+            - name: wallet-keys
+              mountPath: /wallet-ro
+            - name: wallet-rw
+              mountPath: /wallet-rw
+      containers:
+        - name: kuri
+          image: localhost/fgw:local
+          command:
+            - sh
+            - -c
+            - |
+              set -a
+              . /app/config/settings.env
+              set +a
+              ./kuri init
+              exec ./kuri daemon
+          ports:
+            - containerPort: 8078
+              name: s3
+            - containerPort: 443
+              hostPort: 443
+              name: localweb
+            - containerPort: 2112
+              name: metrics
+            - containerPort: 9010
+              name: webui
+          volumeMounts:
+            - name: fgw-data
+              mountPath: /root/.ribsdata
+            - name: wallet-rw
+              mountPath: /root/.ribswallet
+            - name: ipfs-data
+              mountPath: /root/.ipfs
+            - name: config-rw
+              mountPath: /app/config
+              readOnly: true
+          resources:
+            requests:
+              cpu: "4"
+              memory: 4Gi
+            limits:
+              cpu: "32"
+              memory: 64Gi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8078
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8078
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 5
+      volumes:
+        - name: fgw-data
+          persistentVolumeClaim:
+            claimName: fgw-data
+        - name: ipfs-data
+          persistentVolumeClaim:
+            claimName: ipfs-data
+        - name: wallet-keys
+          secret:
+            secretName: wallet-keys
+        - name: config-ro
+          configMap:
+            name: fgw-config
+        - name: config-rw
+          emptyDir: {}
+        - name: wallet-rw
+          emptyDir: {}
+        - name: secrets
+          secret:
+            secretName: fgw-secrets
