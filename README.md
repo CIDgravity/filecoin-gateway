@@ -169,7 +169,7 @@ This removes YugabyteDB data, block groups, and IPFS data, but preserves your `s
 ### Option 2 — Build From Source
 #### Prerequisites
 - YugabyteDB instance (YSQL port 5433, YCQL port 9042)
-- Go 1.24+ toolchain
+- Go 1.26.8+ toolchain
 - Rclone (for data upload)
 
 #### Install
