@@ -202,7 +202,7 @@ func (m *mfsNfsFs) OpenFile(name string, flag int, perm os.FileMode) (billy.File
 
 	fi.RawLeaves = true
 
-	fd, err := fi.Open(mfs.Flags{Read: read, Write: write, Sync: flush})
+	fd, err := fi.Open(context.TODO(), mfs.Flags{Read: read, Write: write, Sync: flush})
 	if err != nil {
 		return nil, xerrors.Errorf("mfsfile open (%t %t %t, %x): %w", read, write, flush, flag, err)
 	}
