@@ -71,7 +71,7 @@ type mfsDavFs struct {
 }
 
 func (m *mfsDavFs) Mkdir(ctx context.Context, name string, perm os.FileMode) error {
-	ret := mfs.Mkdir(m.mr, name, mfs.MkdirOpts{Mkparents: true, Mode: perm, ModTime: time.Now()})
+	ret := mfs.Mkdir(m.mr, name, mfs.MkdirOpts{Mkparents: true}, mfs.WithMode(perm), mfs.WithModTime(time.Now()))
 	if ret != nil {
 		log.Errorw("mfsDavFs.Mkdir", "error", ret, "name", name)
 	} else {
@@ -348,7 +348,7 @@ func (m *mfsDavFs) OpenFile(ctx context.Context, name string, flag int, perm os.
 		mtime = time.Unix(0, 0)
 	}
 
-	fd, err := fi.Open(mfs.Flags{Read: read, Write: write, Sync: flush})
+	fd, err := fi.Open(ctx, mfs.Flags{Read: read, Write: write, Sync: flush})
 	if err != nil {
 		return nil, xerrors.Errorf("mfsfile open (%t %t %t, %x): %w", read, write, flush, flag, err)
 	}
