@@ -253,7 +253,8 @@ func (r *ribs) claimExtendCycle(ctx context.Context) error {
 
 		m, err = chain.GasEstimateMessageGas(ctx, m, nil, types.EmptyTSK)
 
-		if (err != nil && strings.Contains(err.Error(), "call ran out of gas")) || m.GasLimit >= build.BlockGasLimit*4/5 {
+		outOfGas := err != nil && strings.Contains(err.Error(), "call ran out of gas")
+		if (outOfGas || (err == nil && m.GasLimit >= build.BlockGasLimit*4/5)) && len(params.Terms) > 1 {
 			// estimate two messages
 			p1 := params
 			p2 := params
@@ -272,12 +273,12 @@ func (r *ribs) claimExtendCycle(ctx context.Context) error {
 			return nil, nil
 		}
 
+		if err != nil {
+			return nil, xerrors.Errorf("estimating gas for %d claim extensions: %w", len(params.Terms), err)
+		}
+
 		// overestimate a little more
 		m.GasLimit = m.GasLimit * 10 / 9
-
-		if err != nil {
-			return nil, err
-		}
 
 		fmt.Printf("(claim ext) Message: %d Exts GasLimit=%d (%02d%% blk lim), GasFeeCap=%s, GasPremium=%s, Fee=%s\n", len(params.Terms),
 			m.GasLimit, m.GasLimit*100/build.BlockGasLimit, m.GasFeeCap, m.GasPremium, types.FIL(m.RequiredFunds()))

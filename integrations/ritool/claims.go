@@ -134,7 +134,8 @@ var claimsExtendCmd = &cli.Command{
 
 			m, err = chain.GasEstimateMessageGas(ctx, m, nil, types.EmptyTSK)
 
-			if (err != nil && strings.Contains(err.Error(), "call ran out of gas")) || m.GasLimit >= build.BlockGasLimit*4/5 {
+			outOfGas := err != nil && strings.Contains(err.Error(), "call ran out of gas")
+			if (outOfGas || (err == nil && m.GasLimit >= build.BlockGasLimit*4/5)) && len(params.Terms) > 1 {
 				// estimate two messages
 				p1 := params
 				p2 := params
@@ -154,7 +155,7 @@ var claimsExtendCmd = &cli.Command{
 			}
 
 			if err != nil {
-				return nil, err
+				return nil, xerrors.Errorf("estimating gas for %d claim extensions: %w", len(params.Terms), err)
 			}
 
 			fmt.Printf("Estimate: %d Exts GasLimit=%d (%02d%% blk lim), GasFeeCap=%s, GasPremium=%s, Fee=%s\n", len(params.Terms),
