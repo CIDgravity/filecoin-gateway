@@ -181,24 +181,9 @@ func (r *ribs) makeMoreDeals(ctx context.Context, id iface.GroupKey, w *ributil.
 		return xerrors.Errorf("get wallet address: %w", err)
 	}
 
-	log.Infow("makeMoreDeals: getting verified client status", "group", id, "wallet", walletAddr)
-	vc, err := gw.StateVerifiedClientStatus(ctx, walletAddr, ctypes.EmptyTSK)
-	if err != nil {
-		return xerrors.Errorf("getting verified client status: %w", err)
-	}
-	log.Infow("makeMoreDeals: got verified client status", "group", id, "datacap", vc)
-
+	// Datacap no longer exists: deals (and the CIDgravity GBAP request) are always non-verified
 	verified := false
-	maxToPay := maxPrice
-
-	if vc != nil {
-		if vc.LessThan(minDatacap) {
-			return xerrors.Errorf("not starting additional verified deals: datacap too low (%s, min %s)", ctypes.SizeStr(*vc), ctypes.SizeStr(minDatacap))
-		}
-
-		maxToPay = maxVerifPrice
-		verified = true
-	}
+	maxToPay := float64(0)
 
 	pieceCid, err := commcid.PieceCommitmentV1ToCID(dealInfo.CommP)
 	if err != nil {
@@ -391,9 +376,8 @@ func (r *ribs) makeMoreDeals(ctx context.Context, id iface.GroupKey, w *ributil.
 
 		s, err := r.host.NewStream(ctx, addrInfo.ID, DealProtocolv121)
 		if err != nil {
-			err = r.db.StoreRejectedDeal(di.DealUUID, xerrors.Errorf("opening deal proposal stream: %w", err).Error(), 0)
-			if err != nil {
-				return fmt.Errorf("saving rejected deal info: %w", err)
+			if sterr := r.db.StoreRejectedDeal(di.DealUUID, xerrors.Errorf("opening deal proposal stream: %w", err).Error(), 0); sterr != nil {
+				return fmt.Errorf("saving rejected deal info: %w", sterr)
 			}
 
 			return fmt.Errorf("failed to open stream to peer %s: %w", addrInfo.ID, err)
@@ -402,9 +386,8 @@ func (r *ribs) makeMoreDeals(ctx context.Context, id iface.GroupKey, w *ributil.
 
 		var resp types.DealResponse
 		if err := doRpc(ctx, s, &dealParams, &resp); err != nil {
-			err = r.db.StoreRejectedDeal(di.DealUUID, xerrors.Errorf("sending deal proposal rpc: %w", err).Error(), 0)
-			if err != nil {
-				return fmt.Errorf("saving rejected deal info: %w", err)
+			if sterr := r.db.StoreRejectedDeal(di.DealUUID, xerrors.Errorf("sending deal proposal rpc: %w", err).Error(), 0); sterr != nil {
+				return fmt.Errorf("saving rejected deal info: %w", sterr)
 			}
 
 			return fmt.Errorf("send proposal rpc: %w", err)

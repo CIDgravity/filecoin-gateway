@@ -207,7 +207,7 @@ func (cd *CidGravity) TestGetBestAvailableProviders(ctx context.Context, apiToke
 		Duration:             518400,
 		StoragePricePerEpoch: "0",
 		ProviderCollateral:   "0",
-		VerifiedDeal:         true,
+		VerifiedDeal:         false,
 		TransferSize:         34359738368,
 		TransferType:         "http",
 		RemoveUnsealedCopy:   false,
